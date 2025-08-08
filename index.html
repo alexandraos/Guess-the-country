@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Guess the Country</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: sans-serif;
+    }
+    #map {
+      height: 100%;
+    }
+    #game-ui {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 999;
+      background: rgba(255, 255, 255, 0.95);
+      padding: 12px;
+      border-radius: 8px;
+      box-shadow: 0 0 5px rgba(0,0,0,0.3);
+    }
+    button {
+      margin-top: 10px;
+      padding: 8px 12px;
+      font-size: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <div id="game-ui">
+    <h1>Guess the Country</h1>
+    <p id="round-info">Round 0 of 10</p>
+    <p id="prompt">Click on: <strong id="country-name">Loading...</strong></p>
+    <p id="feedback"></p>
+    <p id="score">Score: 0</p>
+    <button id="action-btn" disabled>Validate</button>
+    <button id="restart-btn" style="display:none;">Play Again</button>
+  </div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/@turf/turf/turf.min.js"></script>
+  <script>
+    const GEOJSON_URL = 'https://raw.githubusercontent.com/johan/world.geo.json/master/countries.geo.json';
+
+    let gameMode = "validate";
+    let map, countriesData = [], currentCountry = null;
+    let countriesLayer = null, marker = null, guessCoords = null;
+    let round = 0, score = 0, maxRounds = 10;
+    let usedCountries = [];
+    let usedCountryIds = [];
+
+    const isMobile = window.innerWidth < 768;
+    const mapBounds = [[-100, -300], [100, 300]];
+
+    map = L.map('map', {
+      zoomControl: false,
+      attributionControl: false,
+      tap: true,
+      inertia: true,
+      worldCopyJump: false,
+      maxBoundsViscosity: 1.0,
+      maxBounds: mapBounds
+    }).setView([20, 0], isMobile ? 3 : 2);
+
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png', {
+      minZoom: 2,
+      maxZoom: 10,
+      noWrap: true
+    }).addTo(map);
+
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+    const countryNameEl = document.getElementById("country-name");
+    const feedbackEl = document.getElementById("feedback");
+    const scoreEl = document.getElementById("score");
+    const roundInfoEl = document.getElementById("round-info");
+    const actionBtn = document.getElementById("action-btn");
+    const restartBtn = document.getElementById("restart-btn");
+
+    actionBtn.onclick = () => {
+      if (gameMode === "validate") validateGuess();
+      else if (gameMode === "next") {
+        round++;
+        startRound();
+      }
+    };
+
+    function loadGeoJSON() {
+      fetch(GEOJSON_URL)
+        .then(res => res.json())
+        .then(data => {
+          countriesData = data.features.filter(f => {
+            const hasName = f.properties && (f.properties.ADMIN || f.properties.name);
+            const hasGeometry = f.geometry && f.geometry.coordinates && f.geometry.coordinates.length > 0;
+            return hasName && hasGeometry;
+          });
+          if (countriesData.length === 0) {
+            countryNameEl.textContent = "❌ No country data found.";
+          } else {
+            startGame();
+          }
+        })
+        .catch(err => {
+          console.error("GeoJSON load error:", err);
+          countryNameEl.textContent = "❌ Failed to load country data.";
+        });
+    }
+
+    function getCountryId(country) {
+  return country.id || (country.properties.ADMIN || country.properties.name);
+}
+
+function getRandomCountry() {
+  const unused = countriesData.filter(c => !usedCountryIds.includes(getCountryId(c)));
+
+  if (unused.length === 0) return null;
+
+  const candidate = unused[Math.floor(Math.random() * unused.length)];
+  const id = getCountryId(candidate);
+
+  if (id) usedCountryIds.push(id);
+
+  return candidate;
+}
+
+function startGame() {
+  round = 1;
+  score = 0;
+  usedCountryIds = []; // Reset ID tracking
+  gameMode = "validate";
+  restartBtn.style.display = "none";
+  actionBtn.style.display = "inline-block";
+  actionBtn.disabled = true;
+  scoreEl.textContent = "Score: 0";
+  feedbackEl.textContent = "";
+  startRound();
+}
+
+    function startRound() {
+      if (round > maxRounds) {
+        endGame();
+        return;
+      }
+
+      gameMode = "validate";
+      actionBtn.textContent = "Validate";
+      actionBtn.disabled = true;
+
+      if (countriesLayer && map.hasLayer(countriesLayer)) map.removeLayer(countriesLayer);
+      countriesLayer = null;
+
+      if (marker) map.removeLayer(marker);
+      marker = null;
+
+      guessCoords = null;
+      currentCountry = getRandomCountry();
+      if (!currentCountry) {
+        countryNameEl.textContent = "⚠️ Could not load country.";
+        return;
+      }
+
+      const name = currentCountry.properties.ADMIN || currentCountry.properties.name || "Unknown";
+      countryNameEl.textContent = name;
+      roundInfoEl.textContent = `Round ${round} of ${maxRounds}`;
+      feedbackEl.textContent = "";
+    }
+
+    function validateGuess() {
+      if (!guessCoords || !currentCountry) return;
+
+      const clickedPoint = turf.point([guessCoords.lng, guessCoords.lat]);
+      const countryPolygon = currentCountry.geometry;
+      const countryName = currentCountry.properties.ADMIN || currentCountry.properties.name || "this country";
+
+      if (!countryPolygon || !countryPolygon.coordinates || countryPolygon.coordinates.length === 0) {
+        feedbackEl.textContent = `⚠️ Invalid geometry for ${countryName}`;
+        return;
+      }
+
+      let correct = false;
+      try {
+        if (countryPolygon.type === "Polygon") {
+          correct = turf.booleanPointInPolygon(clickedPoint, countryPolygon);
+        } else if (countryPolygon.type === "MultiPolygon") {
+          for (let coords of countryPolygon.coordinates) {
+            if (turf.booleanPointInPolygon(clickedPoint, {
+              type: "Polygon",
+              coordinates: coords
+            })) {
+              correct = true;
+              break;
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("Turf polygon check failed", countryName, err);
+        feedbackEl.textContent = `⚠️ Could not validate ${countryName}`;
+        return;
+      }
+
+      if (correct) {
+        score++;
+        feedbackEl.textContent = `✅ Correct! That was ${countryName}.`;
+      } else {
+        feedbackEl.textContent = `❌ Wrong! That was not ${countryName}.`;
+      }
+
+      scoreEl.textContent = `Score: ${score}`;
+
+      try {
+        if (countriesLayer && map.hasLayer(countriesLayer)) map.removeLayer(countriesLayer);
+        countriesLayer = L.geoJSON(currentCountry, {
+          style: {
+            color: correct ? "green" : "red",
+            weight: 2,
+            fillOpacity: 0.1
+          }
+        });
+        if (countriesLayer.getLayers().length > 0) {
+          countriesLayer.addTo(map);
+        } else {
+          console.warn("Empty layer for", countryName);
+        }
+      } catch (err) {
+        console.warn("GeoJSON outline render failed for", countryName, err);
+      }
+
+      gameMode = "next";
+      actionBtn.textContent = "Next";
+      actionBtn.disabled = false;
+    }
+    
+    map.on('click', function(e) {
+      if (!currentCountry || gameMode !== "validate") return;
+
+      guessCoords = e.latlng;
+
+      if (marker) map.removeLayer(marker);
+      marker = L.marker(guessCoords).addTo(map);
+
+      actionBtn.disabled = false;
+    });
+
+    function endGame() {
+      feedbackEl.textContent = `🏁 Game Over! Your final score is ${score}/${maxRounds}.`;
+      restartBtn.style.display = "block";
+      actionBtn.style.display = "none";
+      countryNameEl.textContent = "";
+      roundInfoEl.textContent = "";
+      if (countriesLayer && map.hasLayer(countriesLayer)) map.removeLayer(countriesLayer);
+      if (marker) map.removeLayer(marker);
+    }
+
+    restartBtn.addEventListener('click', startGame);
+    loadGeoJSON();
+  </script>
+</body>
+</html>
